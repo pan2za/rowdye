@@ -12,4 +12,5 @@ Therefore, it is proposed to develop RowDye, a lightweight tool dedicated exclus
 ./rundoc.sh
 
 ### Effects
+<img width="1207" height="371" alt="bdafc92a600762d2f3e1cbe977a1f802" src="https://github.com/user-attachments/assets/bcc0f2c1-f3c0-4297-b7d7-dd408b583053" />
 
