@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import uno
 from com.sun.star.beans import PropertyValue
 
@@ -494,12 +495,54 @@ class LineColorizer:
     def get_results(self):
         return self.colored_count, self.current_target_index
 
+def create_save_properties(file_format="MS Word 2007-2019 (.docx)"):
+    """创建完整的保存属性配置，防止文件损坏"""
+    properties = []
+    
+    # 设置文件格式
+    fmt = PropertyValue()
+    fmt.Name = "FilterName"
+    fmt.Value = file_format
+    properties.append(fmt)
+    
+    # 禁用快速保存
+    fast_save = PropertyValue()
+    fast_save.Name = "FastSave"
+    fast_save.Value = False
+    properties.append(fast_save)
+    
+    # 设置保存为副本（避免文件锁定）
+    as_copy = PropertyValue()
+    as_copy.Name = "AsCopy"
+    as_copy.Value = True
+    properties.append(as_copy)
+    
+    # 禁用压缩（防止格式损坏）
+    compress = PropertyValue()
+    compress.Name = "Compress"
+    compress.Value = False
+    properties.append(compress)
+    
+    return tuple(properties)
+
 def process_doc_ultimate(input_path, output_path):
+    # 确保输出目录存在
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
     # 连接LibreOffice
-    local_ctx = uno.getComponentContext()
-    resolver = local_ctx.ServiceManager.createInstanceWithContext(
-        "com.sun.star.bridge.UnoUrlResolver", local_ctx
-    )
+    try:
+        local_ctx = uno.getComponentContext()
+        resolver = local_ctx.ServiceManager.createInstanceWithContext(
+            "com.sun.star.bridge.UnoUrlResolver", local_ctx
+        )
+    except Exception as e:
+        print("❌ 无法初始化UNO上下文：")
+        print("   请确保已安装 libreoffice-python3 包")
+        print(f"   错误详情: {str(e)}")
+        sys.exit(1)
+        
     try:
         ctx = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
     except Exception as e:
@@ -509,57 +552,112 @@ def process_doc_ultimate(input_path, output_path):
 
     desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
 
+    # 打开文档的配置（防止只读模式）
+    open_props = []
+    read_only = PropertyValue()
+    read_only.Name = "ReadOnly"
+    read_only.Value = False
+    open_props.append(read_only)
+    
     # 打开文档
     input_abs = os.path.abspath(input_path)
     in_url = uno.systemPathToFileUrl(input_abs)
+    doc = None
     try:
-        doc = desktop.loadComponentFromURL(in_url, "_blank", 0, ())
+        doc = desktop.loadComponentFromURL(in_url, "_blank", 0, tuple(open_props))
+        if not doc:
+            raise Exception("无法加载文档对象")
     except Exception as e:
         print(f"❌ 打开文档失败：{str(e)}")
         sys.exit(1)
 
-    # 获取文档中的所有文本行
-    text = doc.getText()
-    full_text = text.getString()
-    doc_lines = full_text.split('\n')
-    
-    print(f"\n📄 文档包含 {len(doc_lines)} 行文本")
-    
-    # 创建着色器并处理文档
-    colorizer = LineColorizer(doc, doc_lines)
-    colorizer.process_document()
-    
-    colored_count, processed_count = colorizer.get_results()
-
-    # 保存DOCX
-    output_abs = os.path.abspath(output_path)
-    out_url = uno.systemPathToFileUrl(output_abs)
     try:
-        doc.storeAsURL(out_url, ())
-        print(f"\n✅ DOCX保存成功：{output_abs}")
-    except Exception as e:
-        print(f"❌ DOCX保存失败：{str(e)}")
-        sys.exit(1)
-
-    # 导出PDF
-    try:
-        pdf_path = os.path.splitext(output_abs)[0] + ".pdf"
-        pdf_url = uno.systemPathToFileUrl(pdf_path)
+        # 获取文档中的所有文本行
+        text = doc.getText()
+        full_text = text.getString()
+        doc_lines = full_text.split('\n')
         
-        filter_data = []
-        f = PropertyValue()
-        f.Name = "FilterName"
-        f.Value = "writer_pdf_Export"
-        filter_data.append(f)
+        print(f"\n📄 文档包含 {len(doc_lines)} 行文本")
         
-        doc.storeToURL(pdf_url, tuple(filter_data))
-        print(f"✅ PDF导出成功：{pdf_path}")
-    except Exception as e:
-        print(f"⚠️ PDF导出失败：{str(e)}")
+        # 创建着色器并处理文档
+        colorizer = LineColorizer(doc, doc_lines)
+        colorizer.process_document()
+        
+        colored_count, processed_count = colorizer.get_results()
 
-    # 关闭文档
-    doc.close(True)
-    print(f"\n📊 统计 | 总行数：{len(doc_lines)} | 成功上色行数：{colored_count}")
+        # 保存DOCX（使用完整的保存配置）
+        output_abs = os.path.abspath(output_path)
+        out_url = uno.systemPathToFileUrl(output_abs)
+        
+        # 删除已存在的输出文件（避免权限问题）
+        if os.path.exists(output_abs):
+            try:
+                os.remove(output_abs)
+            except:
+                pass
+        
+        # 使用完整的保存属性
+        save_props = create_save_properties()
+        try:
+            # 第一次尝试保存
+            doc.storeAsURL(out_url, save_props)
+            # 强制刷新保存
+            doc.store()
+            # 延迟确保写入完成
+            time.sleep(2)
+            print(f"\n✅ DOCX保存成功：{output_abs}")
+        except Exception as e:
+            print(f"⚠️ 高级保存失败，尝试基础保存方式：{str(e)}")
+            # 重试基础保存方式
+            doc.storeAsURL(out_url, ())
+            time.sleep(2)
+            print(f"✅ DOCX基础保存成功：{output_abs}")
+
+        # 导出PDF
+        try:
+            pdf_path = os.path.splitext(output_abs)[0] + ".pdf"
+            pdf_url = uno.systemPathToFileUrl(pdf_path)
+            
+            # 删除已存在的PDF文件
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except:
+                    pass
+            
+            pdf_props = []
+            f = PropertyValue()
+            f.Name = "FilterName"
+            f.Value = "writer_pdf_Export"
+            pdf_props.append(f)
+            
+            # PDF导出额外配置
+            pdf_quality = PropertyValue()
+            pdf_quality.Name = "Quality"
+            pdf_quality.Value = 90
+            pdf_props.append(pdf_quality)
+            
+            doc.storeToURL(pdf_url, tuple(pdf_props))
+            time.sleep(1)
+            print(f"✅ PDF导出成功：{pdf_path}")
+        except Exception as e:
+            print(f"⚠️ PDF导出失败：{str(e)}")
+
+        print(f"\n📊 统计 | 总行数：{len(doc_lines)} | 成功上色行数：{colored_count}")
+        
+    finally:
+        # 确保文档正确关闭
+        if doc:
+            try:
+                # 先解除文件锁定
+                if hasattr(doc, 'dispose'):
+                    doc.dispose()
+                # 延迟确保资源释放
+                time.sleep(2)
+                # 关闭文档
+                doc.close(True)
+            except Exception as e:
+                print(f"⚠️ 关闭文档时警告：{str(e)}")
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -569,8 +667,14 @@ if __name__ == "__main__":
 
     input_file = sys.argv[1]
     output_file = sys.argv[2]
+    
+    # 验证输入文件
     if not os.path.exists(input_file):
         print(f"❌ 文件不存在：{input_file}")
         sys.exit(1)
-
+    
+    # 验证文件扩展名
+    if not input_file.lower().endswith('.docx'):
+        print(f"⚠️ 警告：输入文件不是.docx格式，可能导致兼容性问题")
+    
     process_doc_ultimate(input_file, output_file)
